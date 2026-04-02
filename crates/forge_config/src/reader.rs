@@ -37,6 +37,68 @@ pub struct ConfigReader {
 }
 
 impl ConfigReader {
+    /// Merges legacy Forge state into the preferred dot-directory without
+    /// overwriting files that already exist there.
+    fn merge_legacy_path(legacy: &PathBuf, preferred: &PathBuf) {
+        if !legacy.exists() {
+            return;
+        }
+
+        // Take the fast path when the preferred directory is absent and the
+        // legacy directory can be moved wholesale.
+        if !preferred.exists() {
+            if std::fs::rename(legacy, preferred).is_ok() {
+                return;
+            }
+        }
+
+        // Merge recursively so pre-existing ~/.forge content does not strand
+        // skills, agents, config, or credentials in the legacy directory.
+        if std::fs::create_dir_all(preferred).is_err() {
+            return;
+        }
+
+        Self::merge_directory_entries(legacy, preferred);
+        Self::remove_dir_if_empty(legacy);
+    }
+
+    /// Recursively merges directory entries from `source` into `target`,
+    /// preserving files that already exist in `target`.
+    fn merge_directory_entries(source: &PathBuf, target: &PathBuf) {
+        let Ok(entries) = std::fs::read_dir(source) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let source_path = entry.path();
+            let target_path = target.join(entry.file_name());
+
+            // Move brand-new paths directly to avoid unnecessary copying.
+            if !target_path.exists() {
+                let _ = std::fs::rename(&source_path, &target_path);
+                continue;
+            }
+
+            // Merge nested directories so legacy skills/agents are not stranded
+            // when ~/.forge already contains other content.
+            if source_path.is_dir() && target_path.is_dir() {
+                Self::merge_directory_entries(&source_path, &target_path);
+                Self::remove_dir_if_empty(&source_path);
+            }
+        }
+    }
+
+    /// Removes `path` when it exists and no longer contains any entries.
+    fn remove_dir_if_empty(path: &PathBuf) {
+        let Ok(mut entries) = std::fs::read_dir(path) else {
+            return;
+        };
+
+        if entries.next().is_none() {
+            let _ = std::fs::remove_dir(path);
+        }
+    }
+
     /// Returns the canonical base directory for Forge state (`~/.forge`),
     /// migrating the legacy `~/forge` directory when possible.
     fn resolved_base_path() -> PathBuf {
@@ -44,18 +106,15 @@ impl ConfigReader {
         let preferred = home.join(".forge");
         let legacy = home.join("forge");
 
-        // Prefer the dot-directory immediately when it already exists.
-        if preferred.exists() {
-            return preferred;
+        // Keep the dot-directory canonical, but merge legacy contents into it
+        // when an upgrade leaves both locations present.
+        if legacy.exists() {
+            Self::merge_legacy_path(&legacy, &preferred);
         }
 
-        // Migrate the legacy directory in place so existing state keeps working
-        // under the new standard location.
-        if legacy.exists() {
-            if std::fs::rename(&legacy, &preferred).is_ok() {
-                return preferred;
-            }
-
+        // Fall back to the legacy directory only when migration could not move
+        // it into place and the preferred directory still does not exist.
+        if legacy.exists() && !preferred.exists() {
             return legacy;
         }
 
@@ -258,6 +317,32 @@ mod tests {
 
         assert_eq!(actual, expected);
         assert!(expected.exists());
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn test_base_path_merges_legacy_directory_into_existing_dot_forge() {
+        let fixture = TestDir::new("existing-dot-forge");
+        let _guard = EnvGuard::set(&[("HOME", fixture.path().to_str().unwrap())]);
+        let legacy = fixture.path().join("forge");
+        let preferred = fixture.path().join(".forge");
+
+        std::fs::create_dir_all(preferred.join("skills")).unwrap();
+        std::fs::write(preferred.join(".credentials.json"), "{\"new\":true}").unwrap();
+        std::fs::create_dir_all(legacy.join("skills/custom-skill")).unwrap();
+        std::fs::write(legacy.join(".forge.toml"), "tool_supported = true\n").unwrap();
+        std::fs::write(
+            legacy.join("skills/custom-skill/SKILL.md"),
+            "# migrated skill\n",
+        )
+        .unwrap();
+
+        let actual = ConfigReader::base_path();
+
+        assert_eq!(actual, preferred);
+        assert!(preferred.join(".forge.toml").exists());
+        assert!(preferred.join(".credentials.json").exists());
+        assert!(preferred.join("skills/custom-skill/SKILL.md").exists());
         assert!(!legacy.exists());
     }
 

@@ -457,6 +457,22 @@ function _forge_action_config() {
     $_FORGE_BIN config list
 }
 
+# Resolve the active Forge config directory, matching the runtime fallback from
+# ~/.forge to the legacy ~/forge location when migration has not happened yet.
+function _forge_config_dir() {
+    if [[ -d "${HOME}/.forge" ]]; then
+        echo "${HOME}/.forge"
+        return 0
+    fi
+
+    if [[ -d "${HOME}/forge" ]]; then
+        echo "${HOME}/forge"
+        return 0
+    fi
+
+    echo "${HOME}/.forge"
+}
+
 # Action handler: Open the global forge config file in an editor
 function _forge_action_config_edit() {
     echo
@@ -470,12 +486,14 @@ function _forge_action_config_edit() {
         return 1
     fi
 
-    local config_file="${HOME}/.forge/.forge.toml"
+    local config_dir
+    config_dir=$(_forge_config_dir)
+    local config_file="${config_dir}/.forge.toml"
 
     # Ensure the config directory exists
-    if [[ ! -d "${HOME}/.forge" ]]; then
-        mkdir -p "${HOME}/.forge" || {
-            _forge_log error "Failed to create ~/.forge directory"
+    if [[ ! -d "$config_dir" ]]; then
+        mkdir -p "$config_dir" || {
+            _forge_log error "Failed to create $config_dir"
             return 1
         }
     fi

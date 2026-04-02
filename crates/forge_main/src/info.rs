@@ -32,7 +32,7 @@ impl Section {
 /// color coding automatically.
 ///
 /// # Display Conventions
-/// 
+///
 /// When using Info, follow these conventions for consistency:
 ///
 /// ## Keys (Labels)
