@@ -461,9 +461,22 @@ function _forge_action_config() {
 # ~/.forge to the legacy ~/forge location whenever legacy state still exists.
 function _forge_config_dir() {
     local legacy_dir="${HOME}/forge"
+    local preferred_dir="${HOME}/.forge"
     local legacy_probe
 
     if [[ -d "$legacy_dir" ]]; then
+        if [[ ! -d "$preferred_dir" ]]; then
+            # Mirror the runtime's fast path: move the whole legacy directory
+            # into ~/.forge when nothing exists there yet.
+            if mv "$legacy_dir" "$preferred_dir" 2>/dev/null; then
+                echo "$preferred_dir"
+                return 0
+            fi
+
+            echo "$legacy_dir"
+            return 0
+        fi
+
         legacy_probe=$(find "$legacy_dir" -mindepth 1 -print -quit 2>/dev/null)
 
         if [[ $? -ne 0 || -n "$legacy_probe" ]]; then
@@ -472,7 +485,7 @@ function _forge_config_dir() {
         fi
     fi
 
-    echo "${HOME}/.forge"
+    echo "$preferred_dir"
 }
 
 # Action handler: Open the global forge config file in an editor
