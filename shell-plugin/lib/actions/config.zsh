@@ -457,17 +457,15 @@ function _forge_action_config() {
     $_FORGE_BIN config list
 }
 
-# Resolve the active Forge config directory, matching the runtime fallback from
-# ~/.forge to the legacy ~/forge location whenever legacy state still exists.
+# Resolve the active Forge config directory using the same blunt migration rule
+# as the runtime: move ~/forge to ~/.forge only when it is the sole home.
 function _forge_config_dir() {
     local legacy_dir="${HOME}/forge"
     local preferred_dir="${HOME}/.forge"
-    local legacy_probe
 
     if [[ -d "$legacy_dir" ]]; then
-        if [[ ! -d "$preferred_dir" ]]; then
-            # Mirror the runtime's fast path: move the whole legacy directory
-            # into ~/.forge when nothing exists there yet.
+        # Take the simple migration path when only the legacy home exists.
+        if [[ ! -e "$preferred_dir" ]]; then
             if mv "$legacy_dir" "$preferred_dir" 2>/dev/null; then
                 echo "$preferred_dir"
                 return 0
@@ -477,12 +475,10 @@ function _forge_config_dir() {
             return 0
         fi
 
-        legacy_probe=$(find "$legacy_dir" -mindepth 1 -print -quit 2>/dev/null)
-
-        if [[ $? -ne 0 || -n "$legacy_probe" ]]; then
-            echo "${HOME}/forge"
-            return 0
-        fi
+        # Refuse to merge two homes in zsh; surface the conflict and use the
+        # canonical dot-directory.
+        printf 'Forge found both %s and %s. Using %s and ignoring the legacy directory until you clean it up.\n' \
+            "$legacy_dir" "$preferred_dir" "$preferred_dir" >&2
     fi
 
     echo "$preferred_dir"

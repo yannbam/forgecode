@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Once};
 
 use config::ConfigBuilder;
 use config::builder::DefaultState;
@@ -30,6 +30,10 @@ static LOAD_DOT_ENV: LazyLock<()> = LazyLock::new(|| {
     }
 });
 
+/// Ensures the dual-directory migration conflict is only reported once per
+/// process.
+static REPORT_DUAL_HOME_CONFLICT: Once = Once::new();
+
 /// Merges [`ForgeConfig`] from layered sources using a builder pattern.
 #[derive(Default)]
 pub struct ConfigReader {
@@ -37,119 +41,40 @@ pub struct ConfigReader {
 }
 
 impl ConfigReader {
-    /// Returns true when merging `source` into `target` would strand
-    /// conflicting files that cannot be moved without overwriting data.
-    fn has_unresolved_conflicts(source: &PathBuf, target: &PathBuf) -> bool {
-        let Ok(entries) = std::fs::read_dir(source) else {
-            return false;
-        };
-
-        for entry in entries.flatten() {
-            let source_path = entry.path();
-            let target_path = target.join(entry.file_name());
-
-            if !target_path.exists() {
-                continue;
-            }
-
-            // Matching directories are safe to merge only when their children
-            // also have no conflicting file entries.
-            if source_path.is_dir() && target_path.is_dir() {
-                if Self::has_unresolved_conflicts(&source_path, &target_path) {
-                    return true;
-                }
-                continue;
-            }
-
-            return true;
-        }
-
-        false
-    }
-
-    /// Merges legacy Forge state into the preferred dot-directory without
-    /// overwriting files that already exist there.
-    fn merge_legacy_path(legacy: &PathBuf, preferred: &PathBuf) {
-        if !legacy.exists() {
-            return;
-        }
-
-        // Take the fast path when the preferred directory is absent and the
-        // legacy directory can be moved wholesale.
-        if !preferred.exists() {
-            if std::fs::rename(legacy, preferred).is_ok() {
-                return;
-            }
-        }
-
-        // Abort migration when conflicting files would leave part of the
-        // legacy state stranded outside the active home directory.
-        if Self::has_unresolved_conflicts(legacy, preferred) {
-            return;
-        }
-
-        // Merge recursively once we know the move is conflict-free.
-        if std::fs::create_dir_all(preferred).is_err() {
-            return;
-        }
-
-        Self::merge_directory_entries(legacy, preferred);
-        Self::remove_dir_if_empty(legacy);
-    }
-
-    /// Recursively merges directory entries from `source` into `target`,
-    /// preserving files that already exist in `target`.
-    fn merge_directory_entries(source: &PathBuf, target: &PathBuf) {
-        let Ok(entries) = std::fs::read_dir(source) else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            let source_path = entry.path();
-            let target_path = target.join(entry.file_name());
-
-            // Move brand-new paths directly to avoid unnecessary copying.
-            if !target_path.exists() {
-                let _ = std::fs::rename(&source_path, &target_path);
-                continue;
-            }
-
-            // Merge nested directories so legacy skills/agents are not stranded
-            // when ~/.forge already contains other content.
-            if source_path.is_dir() && target_path.is_dir() {
-                Self::merge_directory_entries(&source_path, &target_path);
-                Self::remove_dir_if_empty(&source_path);
-            }
-        }
-    }
-
-    /// Removes `path` when it exists and no longer contains any entries.
-    fn remove_dir_if_empty(path: &PathBuf) {
-        let Ok(mut entries) = std::fs::read_dir(path) else {
-            return;
-        };
-
-        if entries.next().is_none() {
-            let _ = std::fs::remove_dir(path);
-        }
+    /// Emits a one-time user-visible error when both legacy and preferred
+    /// Forge homes exist and manual cleanup is required.
+    fn report_dual_home_conflict(legacy: &PathBuf, preferred: &PathBuf) {
+        REPORT_DUAL_HOME_CONFLICT.call_once(|| {
+            eprintln!(
+                "Forge found both '{}' and '{}'. Using '{}' and ignoring the legacy directory until you clean it up.",
+                legacy.display(),
+                preferred.display(),
+                preferred.display()
+            );
+        });
     }
 
     /// Returns the canonical base directory for Forge state (`~/.forge`),
-    /// migrating the legacy `~/forge` directory when possible.
+    /// migrating the legacy `~/forge` directory when it is the only home.
     fn resolved_base_path() -> PathBuf {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let preferred = home.join(".forge");
         let legacy = home.join("forge");
 
-        // Keep the dot-directory canonical when migration is safe.
-        if legacy.exists() {
-            Self::merge_legacy_path(&legacy, &preferred);
+        // Move the legacy home wholesale when it is the only directory in
+        // play, keeping the steady-state location canonical.
+        if legacy.exists() && !preferred.exists() {
+            if std::fs::rename(&legacy, &preferred).is_ok() {
+                return preferred;
+            }
+
+            return legacy;
         }
 
-        // Keep reading from the legacy directory until migration actually
-        // clears it out; otherwise existing state can be stranded.
-        if legacy.exists() {
-            return legacy;
+        // Refuse to guess when both directories exist; keep the canonical
+        // dot-directory active and surface the conflict to the user.
+        if legacy.exists() && preferred.exists() {
+            Self::report_dual_home_conflict(&legacy, &preferred);
         }
 
         preferred
@@ -355,48 +280,23 @@ mod tests {
     }
 
     #[test]
-    fn test_base_path_merges_legacy_directory_into_existing_dot_forge() {
-        let fixture = TestDir::new("existing-dot-forge");
+    fn test_base_path_prefers_dot_forge_when_both_directories_exist() {
+        let fixture = TestDir::new("dual-home-conflict");
         let _guard = EnvGuard::set(&[("HOME", fixture.path().to_str().unwrap())]);
         let legacy = fixture.path().join("forge");
         let preferred = fixture.path().join(".forge");
 
-        std::fs::create_dir_all(preferred.join("skills")).unwrap();
-        std::fs::write(preferred.join(".credentials.json"), "{\"new\":true}").unwrap();
-        std::fs::create_dir_all(legacy.join("skills/custom-skill")).unwrap();
+        std::fs::create_dir_all(&preferred).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join(".forge.toml"), "tool_supported = true\n").unwrap();
-        std::fs::write(
-            legacy.join("skills/custom-skill/SKILL.md"),
-            "# migrated skill\n",
-        )
-        .unwrap();
+        std::fs::write(preferred.join(".forge.toml"), "tool_supported = false\n").unwrap();
 
         let actual = ConfigReader::base_path();
 
         assert_eq!(actual, preferred);
         assert!(preferred.join(".forge.toml").exists());
-        assert!(preferred.join(".credentials.json").exists());
-        assert!(preferred.join("skills/custom-skill/SKILL.md").exists());
-        assert!(!legacy.exists());
-    }
-
-    #[test]
-    fn test_base_path_falls_back_to_legacy_when_root_files_conflict() {
-        let fixture = TestDir::new("legacy-conflict");
-        let _guard = EnvGuard::set(&[("HOME", fixture.path().to_str().unwrap())]);
-        let legacy = fixture.path().join("forge");
-        let preferred = fixture.path().join(".forge");
-
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::create_dir_all(&preferred).unwrap();
         std::fs::write(legacy.join(".forge.toml"), "tool_supported = true\n").unwrap();
-        std::fs::write(preferred.join(".forge.toml"), "").unwrap();
-
-        let actual = ConfigReader::base_path();
-
-        assert_eq!(actual, legacy);
         assert!(legacy.join(".forge.toml").exists());
-        assert!(preferred.join(".forge.toml").exists());
     }
 
     #[test]
