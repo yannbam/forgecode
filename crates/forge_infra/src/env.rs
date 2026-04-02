@@ -24,9 +24,9 @@ fn to_environment(cwd: PathBuf) -> Environment {
         } else {
             std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
         },
-        base_path: dirs::home_dir()
-            .map(|h| h.join("forge"))
-            .unwrap_or_else(|| PathBuf::from(".").join("forge")),
+        // Keep the runtime environment aligned with the config resolver so the
+        // canonical ~/.forge path and legacy migration logic stay consistent.
+        base_path: ConfigReader::base_path(),
     }
 }
 
@@ -66,6 +66,21 @@ fn apply_config_op(fc: &mut ForgeConfig, op: ConfigOperation) {
                 provider_id: Some(suggest.provider.as_ref().to_string()),
                 model_id: Some(suggest.model.to_string()),
             });
+        }
+        ConfigOperation::SetReasoningEffort(effort) => {
+            let config_effort = match effort {
+                forge_domain::Effort::None => forge_config::Effort::None,
+                forge_domain::Effort::Minimal => forge_config::Effort::Minimal,
+                forge_domain::Effort::Low => forge_config::Effort::Low,
+                forge_domain::Effort::Medium => forge_config::Effort::Medium,
+                forge_domain::Effort::High => forge_config::Effort::High,
+                forge_domain::Effort::XHigh => forge_config::Effort::XHigh,
+                forge_domain::Effort::Max => forge_config::Effort::Max,
+            };
+            let reasoning = fc
+                .reasoning
+                .get_or_insert_with(forge_config::ReasoningConfig::default);
+            reasoning.effort = Some(config_effort);
         }
     }
 }

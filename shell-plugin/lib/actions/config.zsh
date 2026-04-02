@@ -375,10 +375,113 @@ function _forge_action_model_reset() {
     _forge_log success "Session model reset to global config"
 }
 
+# Action handler: Select reasoning effort for the current session only.
+# Sets _FORGE_SESSION_REASONING_EFFORT in the shell environment so that
+# every subsequent forge invocation uses the selected value via the
+# FORGE_REASONING__EFFORT env var without modifying the permanent config.
+function _forge_action_reasoning_effort() {
+    local input_text="$1"
+    echo
+
+    local efforts
+    efforts=$'EFFORT\nnone\nminimal\nlow\nmedium\nhigh\nxhigh\nmax'
+
+    local current_effort
+    if [[ -n "$_FORGE_SESSION_REASONING_EFFORT" ]]; then
+        current_effort="$_FORGE_SESSION_REASONING_EFFORT"
+    else
+        current_effort=$($_FORGE_BIN config get reasoning-effort 2>/dev/null)
+    fi
+
+    local fzf_args=(
+        --prompt="Reasoning Effort ❯ "
+    )
+
+    if [[ -n "$input_text" ]]; then
+        fzf_args+=(--query="$input_text")
+    fi
+
+    if [[ -n "$current_effort" ]]; then
+        local index=$(_forge_find_index "$efforts" "$current_effort" 1)
+        fzf_args+=(--bind="start:pos($index)")
+    fi
+
+    local selected
+    selected=$(echo "$efforts" | _forge_fzf --header-lines=1 "${fzf_args[@]}")
+
+    if [[ -n "$selected" ]]; then
+        _FORGE_SESSION_REASONING_EFFORT="$selected"
+        _forge_log success "Session reasoning effort set to \033[1m${selected}\033[0m"
+    fi
+}
+
+# Action handler: Set reasoning effort in global config.
+# Calls `forge config set reasoning-effort <effort>` on selection,
+# writing the chosen effort level permanently to ~/.forge/.forge.toml.
+function _forge_action_config_reasoning_effort() {
+    local input_text="$1"
+    (
+        echo
+
+        local efforts
+        efforts=$'EFFORT\nnone\nminimal\nlow\nmedium\nhigh\nxhigh\nmax'
+
+        local current_effort
+        current_effort=$($_FORGE_BIN config get reasoning-effort 2>/dev/null)
+
+        local fzf_args=(
+            --prompt="Config Reasoning Effort ❯ "
+        )
+
+        if [[ -n "$input_text" ]]; then
+            fzf_args+=(--query="$input_text")
+        fi
+
+        if [[ -n "$current_effort" ]]; then
+            local index=$(_forge_find_index "$efforts" "$current_effort" 1)
+            fzf_args+=(--bind="start:pos($index)")
+        fi
+
+        local selected
+        selected=$(echo "$efforts" | _forge_fzf --header-lines=1 "${fzf_args[@]}")
+
+        if [[ -n "$selected" ]]; then
+            _forge_exec config set reasoning-effort "$selected"
+        fi
+    )
+}
+
 # Action handler: Show config list
 function _forge_action_config() {
     echo
     $_FORGE_BIN config list
+}
+
+# Resolve the active Forge config directory using the same blunt migration rule
+# as the runtime: move ~/forge to ~/.forge only when it is the sole home.
+function _forge_config_dir() {
+    local legacy_dir="${HOME}/forge"
+    local preferred_dir="${HOME}/.forge"
+
+    if [[ -d "$legacy_dir" ]]; then
+        # Take the simple migration path when only the legacy home exists.
+        if [[ ! -e "$preferred_dir" ]]; then
+            if mv "$legacy_dir" "$preferred_dir" 2>/dev/null; then
+                echo "$preferred_dir"
+                return 0
+            fi
+
+            echo "$legacy_dir"
+            return 0
+        fi
+
+        # Refuse to merge two homes in zsh; surface the conflict and use the
+        # canonical dot-directory.
+        printf 'Forge found both %s and %s. Using %s and ignoring the legacy directory until you clean it up.\n' \
+            "$legacy_dir" "$preferred_dir" "$preferred_dir" >&2
+    fi
+
+    echo "$preferred_dir"
 }
 
 # Action handler: Open the global forge config file in an editor
@@ -394,12 +497,14 @@ function _forge_action_config_edit() {
         return 1
     fi
 
-    local config_file="${HOME}/forge/.forge.toml"
+    local config_dir
+    config_dir=$(_forge_config_dir)
+    local config_file="${config_dir}/.forge.toml"
 
     # Ensure the config directory exists
-    if [[ ! -d "${HOME}/forge" ]]; then
-        mkdir -p "${HOME}/forge" || {
-            _forge_log error "Failed to create ~/forge directory"
+    if [[ ! -d "$config_dir" ]]; then
+        mkdir -p "$config_dir" || {
+            _forge_log error "Failed to create $config_dir"
             return 1
         }
     fi

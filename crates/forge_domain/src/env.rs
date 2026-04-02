@@ -5,7 +5,7 @@ use derive_more::Display;
 use derive_setters::Setters;
 use serde::{Deserialize, Serialize};
 
-use crate::{ModelId, ProviderId};
+use crate::{Effort, ModelId, ProviderId};
 
 /// Domain-level session configuration pairing a provider with a model.
 ///
@@ -35,6 +35,8 @@ pub enum ConfigOperation {
     SetCommitConfig(crate::CommitConfig),
     /// Set the shell-command suggestion configuration.
     SetSuggestConfig(crate::SuggestConfig),
+    /// Set the reasoning effort level for all agents.
+    SetReasoningEffort(Effort),
 }
 
 const VERSION: &str = match option_env!("APP_VERSION") {
@@ -122,7 +124,7 @@ impl Environment {
         self.base_path.join("cache")
     }
 
-    /// Returns the global skills directory path (~/forge/skills)
+    /// Returns the global skills directory path (~/.forge/skills)
     pub fn global_skills_path(&self) -> PathBuf {
         self.base_path.join("skills")
     }

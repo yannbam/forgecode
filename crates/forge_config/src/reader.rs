@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Once};
 
 use config::ConfigBuilder;
 use config::builder::DefaultState;
@@ -30,6 +30,10 @@ static LOAD_DOT_ENV: LazyLock<()> = LazyLock::new(|| {
     }
 });
 
+/// Ensures the dual-directory migration conflict is only reported once per
+/// process.
+static REPORT_DUAL_HOME_CONFLICT: Once = Once::new();
+
 /// Merges [`ForgeConfig`] from layered sources using a builder pattern.
 #[derive(Default)]
 pub struct ConfigReader {
@@ -37,6 +41,45 @@ pub struct ConfigReader {
 }
 
 impl ConfigReader {
+    /// Emits a one-time user-visible error when both legacy and preferred
+    /// Forge homes exist and manual cleanup is required.
+    fn report_dual_home_conflict(legacy: &PathBuf, preferred: &PathBuf) {
+        REPORT_DUAL_HOME_CONFLICT.call_once(|| {
+            eprintln!(
+                "Forge found both '{}' and '{}'. Using '{}' and ignoring the legacy directory until you clean it up.",
+                legacy.display(),
+                preferred.display(),
+                preferred.display()
+            );
+        });
+    }
+
+    /// Returns the canonical base directory for Forge state (`~/.forge`),
+    /// migrating the legacy `~/forge` directory when it is the only home.
+    fn resolved_base_path() -> PathBuf {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let preferred = home.join(".forge");
+        let legacy = home.join("forge");
+
+        // Move the legacy home wholesale when it is the only directory in
+        // play, keeping the steady-state location canonical.
+        if legacy.exists() && !preferred.exists() {
+            if std::fs::rename(&legacy, &preferred).is_ok() {
+                return preferred;
+            }
+
+            return legacy;
+        }
+
+        // Refuse to guess when both directories exist; keep the canonical
+        // dot-directory active and surface the conflict to the user.
+        if legacy.exists() && preferred.exists() {
+            Self::report_dual_home_conflict(&legacy, &preferred);
+        }
+
+        preferred
+    }
+
     /// Returns the path to the legacy JSON config file
     /// (`~/.forge/.config.json`).
     pub fn config_legacy_path() -> PathBuf {
@@ -49,9 +92,9 @@ impl ConfigReader {
         Self::base_path().join(".forge.toml")
     }
 
-    /// Returns the base directory for all Forge config files (`~/forge`).
+    /// Returns the base directory for all Forge config files (`~/.forge`).
     pub fn base_path() -> PathBuf {
-        dirs::home_dir().unwrap_or(PathBuf::from(".")).join("forge")
+        Self::resolved_base_path()
     }
 
     /// Adds the provided TOML string as a config source without touching the
@@ -125,7 +168,9 @@ impl ConfigReader {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use pretty_assertions::assert_eq;
 
@@ -138,7 +183,7 @@ mod tests {
     /// Holds env vars set for a test's duration and removes them on drop, while
     /// holding [`ENV_MUTEX`].
     struct EnvGuard {
-        keys: Vec<&'static str>,
+        previous: Vec<(&'static str, Option<String>)>,
         _lock: MutexGuard<'static, ()>,
     }
 
@@ -148,20 +193,110 @@ mod tests {
         #[must_use]
         fn set(pairs: &[(&'static str, &str)]) -> Self {
             let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-            let keys = pairs.iter().map(|(k, _)| *k).collect();
+            let previous = pairs
+                .iter()
+                .map(|(key, _)| (*key, std::env::var(key).ok()))
+                .collect();
             for (key, value) in pairs {
                 unsafe { std::env::set_var(key, value) };
             }
-            Self { keys, _lock: lock }
+            Self { previous, _lock: lock }
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            for key in &self.keys {
-                unsafe { std::env::remove_var(key) };
+            for (key, previous) in &self.previous {
+                if let Some(value) = previous {
+                    unsafe { std::env::set_var(key, value) };
+                } else {
+                    unsafe { std::env::remove_var(key) };
+                }
             }
         }
+    }
+
+    /// Owns a unique temporary directory and removes it when the test ends.
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        /// Creates a unique temporary directory rooted under the system temp
+        /// directory.
+        fn new(name: &str) -> Self {
+            let suffix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "forge-config-{name}-{}-{suffix}",
+                std::process::id()
+            ));
+
+            std::fs::create_dir_all(&path).unwrap();
+
+            Self { path }
+        }
+
+        /// Returns the owned path for test setup and assertions.
+        fn path(&self) -> &PathBuf {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn test_base_path_uses_dot_forge_directory() {
+        let fixture = TestDir::new("dot-forge");
+        let _guard = EnvGuard::set(&[("HOME", fixture.path().to_str().unwrap())]);
+
+        let actual = ConfigReader::base_path();
+        let expected = fixture.path().join(".forge");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_base_path_migrates_legacy_forge_directory() {
+        let fixture = TestDir::new("legacy-migration");
+        let _guard = EnvGuard::set(&[("HOME", fixture.path().to_str().unwrap())]);
+        let legacy = fixture.path().join("forge");
+        let expected = fixture.path().join(".forge");
+
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join(".forge.toml"), "tool_supported = true\n").unwrap();
+
+        let actual = ConfigReader::base_path();
+
+        assert_eq!(actual, expected);
+        assert!(expected.exists());
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn test_base_path_prefers_dot_forge_when_both_directories_exist() {
+        let fixture = TestDir::new("dual-home-conflict");
+        let _guard = EnvGuard::set(&[("HOME", fixture.path().to_str().unwrap())]);
+        let legacy = fixture.path().join("forge");
+        let preferred = fixture.path().join(".forge");
+
+        std::fs::create_dir_all(&preferred).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join(".forge.toml"), "tool_supported = true\n").unwrap();
+        std::fs::write(preferred.join(".forge.toml"), "tool_supported = false\n").unwrap();
+
+        let actual = ConfigReader::base_path();
+
+        assert_eq!(actual, preferred);
+        assert!(preferred.join(".forge.toml").exists());
+        std::fs::write(legacy.join(".forge.toml"), "tool_supported = true\n").unwrap();
+        assert!(legacy.join(".forge.toml").exists());
     }
 
     #[test]

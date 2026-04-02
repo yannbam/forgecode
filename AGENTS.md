@@ -11,6 +11,11 @@ This document contains guidelines and best practices for AI agents working with 
 - When running `$prm`, target `main`.
 - When bootstrapping the session make sure that we are on the correct feature branch or on `main`, and that local and remote `main` are in sync before starting new work.
 
+## Dev Slice Workflow
+
+- At the end of each slice build the debug target to check for compilation time errors
+- Before finalizing the PR invoke the code-reviewer subagent
+
 ## Error Management
 
 - Use `anyhow::Result` for error handling in services and repositories.
