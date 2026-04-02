@@ -24,9 +24,9 @@ fn to_environment(cwd: PathBuf) -> Environment {
         } else {
             std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
         },
-        base_path: dirs::home_dir()
-            .map(|h| h.join("forge"))
-            .unwrap_or_else(|| PathBuf::from(".").join("forge")),
+        // Keep the runtime environment aligned with the config resolver so the
+        // canonical ~/.forge path and legacy migration logic stay consistent.
+        base_path: ConfigReader::base_path(),
     }
 }
 

@@ -32,7 +32,7 @@ impl Section {
 /// color coding automatically.
 ///
 /// # Display Conventions
-///
+/// 
 /// When using Info, follow these conventions for consistency:
 ///
 /// ## Keys (Labels)
@@ -75,7 +75,7 @@ impl Section {
 /// # Output Format
 ///
 /// ```text
-/// 
+///
 /// CONFIGURATION
 ///   model gpt-4
 /// provider openai
