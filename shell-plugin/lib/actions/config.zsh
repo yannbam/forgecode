@@ -460,7 +460,9 @@ function _forge_action_config() {
 # Resolve the active Forge config directory, matching the runtime fallback from
 # ~/.forge to the legacy ~/forge location whenever legacy state still exists.
 function _forge_config_dir() {
-    if [[ -d "${HOME}/forge" ]]; then
+    local legacy_dir="${HOME}/forge"
+
+    if [[ -d "$legacy_dir" ]] && find "$legacy_dir" -mindepth 1 -print -quit | grep -q .; then
         echo "${HOME}/forge"
         return 0
     fi
