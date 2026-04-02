@@ -37,6 +37,36 @@ pub struct ConfigReader {
 }
 
 impl ConfigReader {
+    /// Returns true when merging `source` into `target` would strand
+    /// conflicting files that cannot be moved without overwriting data.
+    fn has_unresolved_conflicts(source: &PathBuf, target: &PathBuf) -> bool {
+        let Ok(entries) = std::fs::read_dir(source) else {
+            return false;
+        };
+
+        for entry in entries.flatten() {
+            let source_path = entry.path();
+            let target_path = target.join(entry.file_name());
+
+            if !target_path.exists() {
+                continue;
+            }
+
+            // Matching directories are safe to merge only when their children
+            // also have no conflicting file entries.
+            if source_path.is_dir() && target_path.is_dir() {
+                if Self::has_unresolved_conflicts(&source_path, &target_path) {
+                    return true;
+                }
+                continue;
+            }
+
+            return true;
+        }
+
+        false
+    }
+
     /// Merges legacy Forge state into the preferred dot-directory without
     /// overwriting files that already exist there.
     fn merge_legacy_path(legacy: &PathBuf, preferred: &PathBuf) {
@@ -52,8 +82,13 @@ impl ConfigReader {
             }
         }
 
-        // Merge recursively so pre-existing ~/.forge content does not strand
-        // skills, agents, config, or credentials in the legacy directory.
+        // Abort migration when conflicting files would leave part of the
+        // legacy state stranded outside the active home directory.
+        if Self::has_unresolved_conflicts(legacy, preferred) {
+            return;
+        }
+
+        // Merge recursively once we know the move is conflict-free.
         if std::fs::create_dir_all(preferred).is_err() {
             return;
         }
@@ -106,15 +141,14 @@ impl ConfigReader {
         let preferred = home.join(".forge");
         let legacy = home.join("forge");
 
-        // Keep the dot-directory canonical, but merge legacy contents into it
-        // when an upgrade leaves both locations present.
+        // Keep the dot-directory canonical when migration is safe.
         if legacy.exists() {
             Self::merge_legacy_path(&legacy, &preferred);
         }
 
-        // Fall back to the legacy directory only when migration could not move
-        // it into place and the preferred directory still does not exist.
-        if legacy.exists() && !preferred.exists() {
+        // Keep reading from the legacy directory until migration actually
+        // clears it out; otherwise existing state can be stranded.
+        if legacy.exists() {
             return legacy;
         }
 
@@ -344,6 +378,25 @@ mod tests {
         assert!(preferred.join(".credentials.json").exists());
         assert!(preferred.join("skills/custom-skill/SKILL.md").exists());
         assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn test_base_path_falls_back_to_legacy_when_root_files_conflict() {
+        let fixture = TestDir::new("legacy-conflict");
+        let _guard = EnvGuard::set(&[("HOME", fixture.path().to_str().unwrap())]);
+        let legacy = fixture.path().join("forge");
+        let preferred = fixture.path().join(".forge");
+
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&preferred).unwrap();
+        std::fs::write(legacy.join(".forge.toml"), "tool_supported = true\n").unwrap();
+        std::fs::write(preferred.join(".forge.toml"), "").unwrap();
+
+        let actual = ConfigReader::base_path();
+
+        assert_eq!(actual, legacy);
+        assert!(legacy.join(".forge.toml").exists());
+        assert!(preferred.join(".forge.toml").exists());
     }
 
     #[test]

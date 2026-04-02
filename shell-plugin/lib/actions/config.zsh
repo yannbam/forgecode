@@ -458,13 +458,8 @@ function _forge_action_config() {
 }
 
 # Resolve the active Forge config directory, matching the runtime fallback from
-# ~/.forge to the legacy ~/forge location when migration has not happened yet.
+# ~/.forge to the legacy ~/forge location whenever legacy state still exists.
 function _forge_config_dir() {
-    if [[ -d "${HOME}/.forge" ]]; then
-        echo "${HOME}/.forge"
-        return 0
-    fi
-
     if [[ -d "${HOME}/forge" ]]; then
         echo "${HOME}/forge"
         return 0
