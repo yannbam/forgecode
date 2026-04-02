@@ -461,10 +461,15 @@ function _forge_action_config() {
 # ~/.forge to the legacy ~/forge location whenever legacy state still exists.
 function _forge_config_dir() {
     local legacy_dir="${HOME}/forge"
+    local legacy_probe
 
-    if [[ -d "$legacy_dir" ]] && find "$legacy_dir" -mindepth 1 -print -quit | grep -q .; then
-        echo "${HOME}/forge"
-        return 0
+    if [[ -d "$legacy_dir" ]]; then
+        legacy_probe=$(find "$legacy_dir" -mindepth 1 -print -quit 2>/dev/null)
+
+        if [[ $? -ne 0 || -n "$legacy_probe" ]]; then
+            echo "${HOME}/forge"
+            return 0
+        fi
     fi
 
     echo "${HOME}/.forge"
